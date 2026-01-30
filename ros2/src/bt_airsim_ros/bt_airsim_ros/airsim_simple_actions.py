@@ -77,6 +77,14 @@ class AirSimSimpleActions(Node):
             callback_group=self._cb_group
         )
 
+        self.move_as = ActionServer(
+            self, MoveDirection, "turn_camera",
+            execute_callback=self.execute_turn_camera,
+            goal_callback=self._goal_ok,
+            cancel_callback=self._cancel_ok,
+            callback_group=self._cb_group
+        )
+
         self.get_logger().info("Ready: /takeoff, /move_direction")
 
     # ---------- common callbacks ----------
@@ -95,43 +103,20 @@ class AirSimSimpleActions(Node):
 
     # ---------- actions ----------
     def execute_takeoff(self, goal_handle):
-        goal = goal_handle.request
-        timeout = float(goal.timeout_sec) if goal.timeout_sec > 0.0 else 15.0
-        target_alt = float(goal.target_altitude_m)
-
         feedback = Takeoff.Feedback()
         result = Takeoff.Result()
 
+        def publish(status: str):
+            feedback.status = status
+            goal_handle.publish_feedback(feedback)
+
         with self._lock:
-            start = time.time()
             try:
-                feedback.status = "takeoff_start"
-                goal_handle.publish_feedback(feedback)
+                publish("takeoff_start")
 
+                # Kick off takeoff WITHOUT join, then poll state
                 self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
-
-                if target_alt > 0.0:
-                    feedback.status = f"climb_to_{target_alt:.2f}m"
-                    goal_handle.publish_feedback(feedback)
-
-                    # AirSim NED: z positive down, so altitude up => negative z
-                    target_z = -abs(target_alt)
-                    self.client.moveToZAsync(
-                        z=target_z,
-                        velocity=max(0.5, self.max_z),
-                        vehicle_name=self.vehicle_name
-                    ).join()
-
-                # bounded wait / cancel support
-                while time.time() - start < timeout:
-                    if goal_handle.is_cancel_requested:
-                        self._hover()
-                        goal_handle.canceled()
-                        result.success = False
-                        result.message = "takeoff canceled"
-                        return result
-                    break
-
+                self._hover()
                 goal_handle.succeed()
                 result.success = True
                 result.message = "takeoff complete"
@@ -147,59 +132,39 @@ class AirSimSimpleActions(Node):
     def execute_move_direction(self, goal_handle):
         goal = goal_handle.request
 
-        # goal.twist: geometry_msgs/Twist
-        vx = clamp(float(goal.twist.linear.x), -self.max_xy, self.max_xy)
-        vy = clamp(float(goal.twist.linear.y), -self.max_xy, self.max_xy)
+        # Absolute target position (AirSim world NED, meters)
+        x_t = float(goal.twist.linear.x)
+        y_t = float(goal.twist.linear.y)
+        z_t = -3
 
-        # ROS: +up. AirSim NED: +down => invert
-        vz_ros_up = clamp(float(goal.twist.linear.z), -self.max_z, self.max_z)
-        vz_ned = -vz_ros_up
 
-        duration = max(0.01, float(goal.duration_sec))
-        yaw_rate = clamp(float(goal.twist.angular.z), -self.max_yaw, self.max_yaw)
-        timeout = float(goal.timeout_sec) if goal.timeout_sec > 0.0 else max(5.0, duration + 2.0)
+        yaw_rate = float(goal.twist.angular.z)  # deg/s (rate)
+
+        self.get_logger().info(f"MoveDirection target (x,y): {x_t}, {y_t}, yaw_rate: {yaw_rate}")
 
         feedback = MoveDirection.Feedback()
         result = MoveDirection.Result()
 
+        def publish(status: str):
+            feedback.status = status
+            goal_handle.publish_feedback(feedback)
+
         with self._lock:
-            start = time.time()
             try:
-                # Stream small chunks so cancel is responsive
-                step = 0.1  # seconds
-                elapsed = 0.0
+                publish("move_start")
 
-                while elapsed < duration:
-                    if goal_handle.is_cancel_requested:
-                        self._hover()
-                        goal_handle.canceled()
-                        result.success = False
-                        result.message = "move canceled"
-                        return result
+                yaw_mode = airsim.YawMode(is_rate=False, yaw_or_rate=yaw_rate)
+                self.client.moveToPositionAsync(
+                    x_t, y_t, z_t,
+                    velocity=0.5,
+                    yaw_mode=yaw_mode,
+                    vehicle_name=self.vehicle_name
+                ).join()
 
-                    if time.time() - start > timeout:
-                        self._hover()
-                        goal_handle.abort()
-                        result.success = False
-                        result.message = "move timeout"
-                        return result
-
-                    remaining = duration - elapsed
-                    cmd_dt = min(step, remaining)
-
-                    feedback.time_elapsed = float(elapsed)
-                    goal_handle.publish_feedback(feedback)
-
-                    yaw_mode = airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate)
-
-                    self.client.moveByVelocityBodyFrameAsync(
-                        vx, vy, vz_ned,
-                        duration=cmd_dt,
-                        yaw_mode=yaw_mode,
-                        vehicle_name=self.vehicle_name
-                    ).join()
-
-                    elapsed = time.time() - start
+                self.client.rotateToYawAsync(
+                    yaw_rate,
+                    vehicle_name=self.vehicle_name
+                ).join()
 
                 self._hover()
                 goal_handle.succeed()
@@ -214,6 +179,7 @@ class AirSimSimpleActions(Node):
                 result.message = f"move failed: {e}"
                 return result
 
+
     def destroy_node(self):
         try:
             self._hover()
@@ -223,6 +189,41 @@ class AirSimSimpleActions(Node):
             pass
         super().destroy_node()
 
+
+    def execute_turn_camera(self, goal_handle):
+        goal = goal_handle.request
+
+        feedback = MoveDirection.Feedback()
+        result = MoveDirection.Result()
+
+        def publish(status: str):
+            feedback.status = status
+            goal_handle.publish_feedback(feedback)
+
+        with self._lock:
+            try:
+                publish("turn_camera_start")
+                yaw = float(goal.twist.angular.z)    # degrees
+
+                st = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+                current_yaw = math.degrees(airsim.to_eularian_angles(st.kinematics_estimated.orientation)[2])
+                target_yaw = current_yaw + yaw
+
+                self.client.rotateToYawAsync(
+                    target_yaw,
+                    vehicle_name=self.vehicle_name
+                ).join()
+
+                goal_handle.succeed()
+                result.success = True
+                result.message = "turn_camera complete"
+                return result
+
+            except Exception as e:
+                goal_handle.abort()
+                result.success = False
+                result.message = f"turn_camera failed: {e}"
+                return result
 
 def main():
     rclpy.init()
