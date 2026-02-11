@@ -9,6 +9,8 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
+import numpy as np
+
 import airsim
 
 from bt_airsim_interfaces.action import Takeoff, MoveDirection
@@ -69,7 +71,7 @@ class AirSimSimpleActions(Node):
             callback_group=self._cb_group
         )
 
-        self.move_as = ActionServer(
+        self.move_as1 = ActionServer(
             self, MoveDirection, "move_direction",
             execute_callback=self.execute_move_direction,
             goal_callback=self._goal_ok,
@@ -77,7 +79,7 @@ class AirSimSimpleActions(Node):
             callback_group=self._cb_group
         )
 
-        self.move_as = ActionServer(
+        self.move_as2 = ActionServer(
             self, MoveDirection, "turn_camera",
             execute_callback=self.execute_turn_camera,
             goal_callback=self._goal_ok,
@@ -97,7 +99,7 @@ class AirSimSimpleActions(Node):
     # ---------- helpers ----------
     def _hover(self):
         try:
-            self.client.hoverAsync(vehicle_name=self.vehicle_name).join()
+            self.client.hoverAsync(vehicle_name=self.vehicle_name)
         except Exception:
             pass
 
@@ -138,9 +140,10 @@ class AirSimSimpleActions(Node):
         z_t = -3
 
 
-        yaw_rate = float(goal.twist.angular.z)  # deg/s (rate)
+        yaw = float(goal.twist.angular.z)  # deg
 
-        self.get_logger().info(f"MoveDirection target (x,y): {x_t}, {y_t}, yaw_rate: {yaw_rate}")
+
+        self.get_logger().info(f"MoveDirection target (x,y): {x_t}, {y_t}, yaw_rate: {yaw}")
 
         feedback = MoveDirection.Feedback()
         result = MoveDirection.Result()
@@ -152,21 +155,16 @@ class AirSimSimpleActions(Node):
         with self._lock:
             try:
                 publish("move_start")
-
-                yaw_mode = airsim.YawMode(is_rate=False, yaw_or_rate=yaw_rate)
+                yaw_mode = airsim.YawMode(is_rate=False, yaw_or_rate=yaw *180 / math.pi)
                 self.client.moveToPositionAsync(
                     x_t, y_t, z_t,
                     velocity=0.5,
                     yaw_mode=yaw_mode,
                     vehicle_name=self.vehicle_name
                 ).join()
-
-                self.client.rotateToYawAsync(
-                    yaw_rate,
-                    vehicle_name=self.vehicle_name
-                ).join()
-
+                publish("move_complete")
                 self._hover()
+                publish("hovering")
                 goal_handle.succeed()
                 result.success = True
                 result.message = "move complete"
@@ -205,9 +203,9 @@ class AirSimSimpleActions(Node):
                 publish("turn_camera_start")
                 yaw = float(goal.twist.angular.z)    # degrees
 
-                st = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
-                current_yaw = math.degrees(airsim.to_eularian_angles(st.kinematics_estimated.orientation)[2])
-                target_yaw = current_yaw + yaw
+                # st = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+                # current_yaw = math.degrees(airsim.to_eularian_angles(st.kinematics_estimated.orientation)[2])
+                target_yaw = yaw
 
                 self.client.rotateToYawAsync(
                     target_yaw,

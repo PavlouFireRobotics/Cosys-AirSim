@@ -1474,8 +1474,10 @@ void AirsimROSWrapper::publish_vehicle_state()
         }
 
         // odom and transforms
-        vehicle_ros->odom_local_pub_->publish(vehicle_ros->curr_odom_);
-        publish_odom_tf(vehicle_ros->curr_odom_);
+        if (!vehicle_ros->curr_odom_.child_frame_id.empty()) {
+            vehicle_ros->odom_local_pub_->publish(vehicle_ros->curr_odom_);
+            publish_odom_tf(vehicle_ros->curr_odom_);
+        }
 
         // ground truth GPS position from sim/HITL
         vehicle_ros->global_gps_pub_->publish(vehicle_ros->gps_sensor_msg_);
