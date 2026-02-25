@@ -13,7 +13,7 @@ import numpy as np
 
 import airsim
 
-from bt_airsim_interfaces.action import Takeoff, MoveDirection
+from bt_airsim_interfaces.action import Takeoff, MoveDirection, FollowPath, TurnCamera
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
@@ -80,8 +80,16 @@ class AirSimSimpleActions(Node):
         )
 
         self.move_as2 = ActionServer(
-            self, MoveDirection, "turn_camera",
+            self, TurnCamera, "turn_camera",
             execute_callback=self.execute_turn_camera,
+            goal_callback=self._goal_ok,
+            cancel_callback=self._cancel_ok,
+            callback_group=self._cb_group
+        )
+
+        self.follow_path_as = ActionServer(
+            self, FollowPath, "follow_path",
+            execute_callback=self.execute_follow_path,
             goal_callback=self._goal_ok,
             cancel_callback=self._cancel_ok,
             callback_group=self._cb_group
@@ -188,11 +196,82 @@ class AirSimSimpleActions(Node):
         super().destroy_node()
 
 
+    def execute_follow_path(self, goal_handle):
+        goal = goal_handle.request
+
+        feedback = FollowPath.Feedback()
+        result = FollowPath.Result()
+
+        def publish(status: str, idx: int = -1):
+            feedback.status = status
+            feedback.current_index = idx
+            goal_handle.publish_feedback(feedback)
+
+        # Build AirSim path
+        path = []
+        for i, p in enumerate(goal.points):
+            path.append(airsim.Vector3r(float(p.x), float(p.y), -3.0))
+
+        if len(path) < 2:
+            goal_handle.abort()
+            result.success = False
+            result.message = "need at least 2 points"
+            return result
+
+        velocity = float(goal.velocity) if goal.velocity > 0.0 else 0.5
+        timeout = float(goal.timeout_sec) if goal.timeout_sec > 0.0 else 1e9
+
+        yaw_mode = airsim.YawMode(
+            is_rate=bool(goal.yaw_is_rate),
+            yaw_or_rate=float(goal.yaw_or_rate)
+        )
+
+        lookahead = float(goal.lookahead) if goal.lookahead > 0.0 else 1.0
+        adaptive = bool(goal.adaptive_lookahead)
+
+        with self._lock:
+            try:
+                publish("follow_path_start", 0)
+
+                # Note: AirSim doesn't give per-waypoint callbacks here, so "current_index"
+                # feedback can only be approximate unless you poll position and compute
+                # nearest waypoint (can add that if you want).
+                self.client.moveOnPathAsync(
+                    path,
+                    velocity=velocity,
+                    timeout_sec=timeout,
+                    drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+                    yaw_mode=yaw_mode,
+                    lookahead=lookahead,
+                    adaptive_lookahead=adaptive,
+                    vehicle_name=self.vehicle_name
+                ).join()
+
+                publish("follow_path_complete", len(path) - 1)
+                self._hover()
+
+                goal_handle.succeed()
+                result.success = True
+                result.message = "follow_path complete"
+                return result
+
+            except Exception as e:
+                self._hover()
+                goal_handle.abort()
+                result.success = False
+                result.message = f"follow_path failed: {e}"
+                return result
+
+
+    def _wrap_to_pi(self, angle_rad: float) -> float:
+        """Wrap angle to [-pi, pi]."""
+        return (angle_rad + math.pi) % (2 * math.pi) - math.pi
+
     def execute_turn_camera(self, goal_handle):
         goal = goal_handle.request
 
-        feedback = MoveDirection.Feedback()
-        result = MoveDirection.Result()
+        feedback = TurnCamera.Feedback()
+        result = TurnCamera.Result()
 
         def publish(status: str):
             feedback.status = status
@@ -201,14 +280,39 @@ class AirSimSimpleActions(Node):
         with self._lock:
             try:
                 publish("turn_camera_start")
-                yaw = float(goal.twist.angular.z)    # degrees
 
-                # st = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
-                # current_yaw = math.degrees(airsim.to_eularian_angles(st.kinematics_estimated.orientation)[2])
-                target_yaw = yaw
+                st = self.client.getMultirotorState(vehicle_name=self.vehicle_name)
+                current_yaw = airsim.to_eularian_angles(st.kinematics_estimated.orientation)[2]  # rad
+                target_yaw = float(goal.target_yaw)  # rad
 
-                self.client.rotateToYawAsync(
-                    target_yaw,
+                # Wrap both (optional but helps consistency)
+                current_yaw = self._wrap_to_pi(current_yaw)
+                target_yaw  = self._wrap_to_pi(target_yaw)
+
+                # Shortest signed angular difference target-current in [-pi, pi]
+                delta = self._wrap_to_pi(target_yaw - current_yaw)
+
+                rate = goal.rate if goal.rate > 0.0 else math.radians(self.max_yaw)  # rad/s
+
+                self.get_logger().info(
+                    f"Turning camera from {math.degrees(current_yaw):.1f} deg "
+                    f"to {math.degrees(target_yaw):.1f} deg "
+                    f"(delta {math.degrees(delta):.1f} deg) at {math.degrees(rate):.1f} deg/s"
+                )
+
+                duration = abs(delta) / rate
+                yaw_rate_deg_s = math.copysign(math.degrees(rate), delta)
+
+                # If already basically there, skip
+                if abs(delta) < math.radians(0.5):  # 0.5 deg tolerance
+                    goal_handle.succeed()
+                    result.success = True
+                    result.message = "turn_camera already at target"
+                    return result
+
+                self.client.rotateByYawRateAsync(
+                    yaw_rate=yaw_rate_deg_s,   # deg/s
+                    duration=duration,         # s
                     vehicle_name=self.vehicle_name
                 ).join()
 
