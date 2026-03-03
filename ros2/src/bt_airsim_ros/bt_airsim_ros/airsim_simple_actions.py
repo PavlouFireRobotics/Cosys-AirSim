@@ -13,7 +13,7 @@ import numpy as np
 
 import airsim
 
-from bt_airsim_interfaces.action import Takeoff, MoveDirection, FollowPath, TurnCamera
+from bt_navigation_interfaces.action import StartUp, MoveDirection, TurnCamera
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
@@ -23,7 +23,7 @@ def clamp(x: float, lo: float, hi: float) -> float:
 class AirSimSimpleActions(Node):
     """
     Actions:
-      - /takeoff        (airsim_msgs/Takeoff)
+      - /start_up        (airsim_msgs/StartUp)
       - /move_direction (airsim_msgs/MoveDirection)
 
     move_direction:
@@ -63,9 +63,9 @@ class AirSimSimpleActions(Node):
         self.client.armDisarm(True, vehicle_name=self.vehicle_name)
 
         # --- Action servers ---
-        self.takeoff_as = ActionServer(
-            self, Takeoff, "takeoff",
-            execute_callback=self.execute_takeoff,
+        self.start_up_as = ActionServer(
+            self, StartUp, "start_up",
+            execute_callback=self.execute_start_up,
             goal_callback=self._goal_ok,
             cancel_callback=self._cancel_ok,
             callback_group=self._cb_group
@@ -87,15 +87,7 @@ class AirSimSimpleActions(Node):
             callback_group=self._cb_group
         )
 
-        self.follow_path_as = ActionServer(
-            self, FollowPath, "follow_path",
-            execute_callback=self.execute_follow_path,
-            goal_callback=self._goal_ok,
-            cancel_callback=self._cancel_ok,
-            callback_group=self._cb_group
-        )
-
-        self.get_logger().info("Ready: /takeoff, /move_direction")
+        self.get_logger().info("Ready: /start_up, /move_direction, /turn_camera")
 
     # ---------- common callbacks ----------
     def _goal_ok(self, _goal_request):
@@ -112,9 +104,9 @@ class AirSimSimpleActions(Node):
             pass
 
     # ---------- actions ----------
-    def execute_takeoff(self, goal_handle):
-        feedback = Takeoff.Feedback()
-        result = Takeoff.Result()
+    def execute_start_up(self, goal_handle):
+        feedback = StartUp.Feedback()
+        result = StartUp.Result()
 
         def publish(status: str):
             feedback.status = status
@@ -122,21 +114,21 @@ class AirSimSimpleActions(Node):
 
         with self._lock:
             try:
-                publish("takeoff_start")
+                publish("start_up_start")
 
                 # Kick off takeoff WITHOUT join, then poll state
                 self.client.takeoffAsync(vehicle_name=self.vehicle_name).join()
                 self._hover()
                 goal_handle.succeed()
                 result.success = True
-                result.message = "takeoff complete"
+                result.message = "start_up complete"
                 return result
 
             except Exception as e:
                 self._hover()
                 goal_handle.abort()
                 result.success = False
-                result.message = f"takeoff failed: {e}"
+                result.message = f"start_up failed: {e}"
                 return result
 
     def execute_move_direction(self, goal_handle):
@@ -194,73 +186,6 @@ class AirSimSimpleActions(Node):
         except Exception:
             pass
         super().destroy_node()
-
-
-    def execute_follow_path(self, goal_handle):
-        goal = goal_handle.request
-
-        feedback = FollowPath.Feedback()
-        result = FollowPath.Result()
-
-        def publish(status: str, idx: int = -1):
-            feedback.status = status
-            feedback.current_index = idx
-            goal_handle.publish_feedback(feedback)
-
-        # Build AirSim path
-        path = []
-        for i, p in enumerate(goal.points):
-            path.append(airsim.Vector3r(float(p.x), float(p.y), -3.0))
-
-        if len(path) < 2:
-            goal_handle.abort()
-            result.success = False
-            result.message = "need at least 2 points"
-            return result
-
-        velocity = float(goal.velocity) if goal.velocity > 0.0 else 0.5
-        timeout = float(goal.timeout_sec) if goal.timeout_sec > 0.0 else 1e9
-
-        yaw_mode = airsim.YawMode(
-            is_rate=bool(goal.yaw_is_rate),
-            yaw_or_rate=float(goal.yaw_or_rate)
-        )
-
-        lookahead = float(goal.lookahead) if goal.lookahead > 0.0 else 1.0
-        adaptive = bool(goal.adaptive_lookahead)
-
-        with self._lock:
-            try:
-                publish("follow_path_start", 0)
-
-                # Note: AirSim doesn't give per-waypoint callbacks here, so "current_index"
-                # feedback can only be approximate unless you poll position and compute
-                # nearest waypoint (can add that if you want).
-                self.client.moveOnPathAsync(
-                    path,
-                    velocity=velocity,
-                    timeout_sec=timeout,
-                    drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
-                    yaw_mode=yaw_mode,
-                    lookahead=lookahead,
-                    adaptive_lookahead=adaptive,
-                    vehicle_name=self.vehicle_name
-                ).join()
-
-                publish("follow_path_complete", len(path) - 1)
-                self._hover()
-
-                goal_handle.succeed()
-                result.success = True
-                result.message = "follow_path complete"
-                return result
-
-            except Exception as e:
-                self._hover()
-                goal_handle.abort()
-                result.success = False
-                result.message = f"follow_path failed: {e}"
-                return result
 
 
     def _wrap_to_pi(self, angle_rad: float) -> float:

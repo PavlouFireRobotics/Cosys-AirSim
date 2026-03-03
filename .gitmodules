@@ -1,3 +1,3 @@
-[submodule "ros2/src/bt_airsim_interfaces"]
-	path = ros2/src/bt_airsim_interfaces
-	url = https://github.com/PavlouFireRobotics/bt_airsim_interfaces.git
+[submodule "ros2/src/bt_navigation_interfaces"]
+	path = ros2/src/bt_navigation_interfaces
+	url = https://github.com/PavlouFireRobotics/bt_navigation_interfaces.git
