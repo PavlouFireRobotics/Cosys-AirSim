@@ -43,12 +43,18 @@ class AirSimSimpleActions(Node):
         self.declare_parameter("max_xy_speed", 5.0)        # m/s
         self.declare_parameter("max_z_speed", 2.0)         # m/s (ROS +up)
         self.declare_parameter("max_yaw_rate_deg_s", 90.0) # deg/s
+        self.declare_parameter("start_up_action_name", "start_up")
+        self.declare_parameter("move_direction_action_name", "move_direction")
+        self.declare_parameter("turn_camera_action_name", "turn_camera")
 
         self.host_ip = self.get_parameter("host_ip").value
         self.vehicle_name = self.get_parameter("vehicle_name").value
         self.max_xy = float(self.get_parameter("max_xy_speed").value)
         self.max_z = float(self.get_parameter("max_z_speed").value)
         self.max_yaw = float(self.get_parameter("max_yaw_rate_deg_s").value)
+        self.start_up_action_name = str(self.get_parameter("start_up_action_name").value)
+        self.move_direction_action_name = str(self.get_parameter("move_direction_action_name").value)
+        self.turn_camera_action_name = str(self.get_parameter("turn_camera_action_name").value)
 
         # Serialize AirSim calls so actions don't fight each other
         self._lock = threading.Lock()
@@ -64,7 +70,7 @@ class AirSimSimpleActions(Node):
 
         # --- Action servers ---
         self.start_up_as = ActionServer(
-            self, StartUp, "start_up",
+            self, StartUp, self.start_up_action_name,
             execute_callback=self.execute_start_up,
             goal_callback=self._goal_ok,
             cancel_callback=self._cancel_ok,
@@ -72,7 +78,7 @@ class AirSimSimpleActions(Node):
         )
 
         self.move_as1 = ActionServer(
-            self, MoveDirection, "move_direction",
+            self, MoveDirection, self.move_direction_action_name,
             execute_callback=self.execute_move_direction,
             goal_callback=self._goal_ok,
             cancel_callback=self._cancel_ok,
@@ -80,14 +86,18 @@ class AirSimSimpleActions(Node):
         )
 
         self.move_as2 = ActionServer(
-            self, TurnCamera, "turn_camera",
+            self, TurnCamera, self.turn_camera_action_name,
             execute_callback=self.execute_turn_camera,
             goal_callback=self._goal_ok,
             cancel_callback=self._cancel_ok,
             callback_group=self._cb_group
         )
 
-        self.get_logger().info("Ready: /start_up, /move_direction, /turn_camera")
+        self.get_logger().info(
+            f"Ready: /{self.start_up_action_name}, "
+            f"/{self.move_direction_action_name}, "
+            f"/{self.turn_camera_action_name}"
+        )
 
     # ---------- common callbacks ----------
     def _goal_ok(self, _goal_request):

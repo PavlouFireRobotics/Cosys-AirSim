@@ -2,7 +2,7 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, TextSubstitution
 from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
@@ -71,6 +71,21 @@ def generate_launch_description():
                 'max_xy_speed': max_xy_speed,
                 'max_z_speed': max_z_speed,
                 'max_yaw_rate_deg_s': max_yaw_rate_deg_s,
+                'start_up_action_name': [
+                    TextSubstitution(text='airsim/'),
+                    vehicle_name,
+                    TextSubstitution(text='/start_up'),
+                ],
+                'move_direction_action_name': [
+                    TextSubstitution(text='airsim/'),
+                    vehicle_name,
+                    TextSubstitution(text='/move_direction'),
+                ],
+                'turn_camera_action_name': [
+                    TextSubstitution(text='airsim/'),
+                    vehicle_name,
+                    TextSubstitution(text='/turn_camera'),
+                ],
 
             }],
         ),
